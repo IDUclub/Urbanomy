@@ -11,20 +11,23 @@ authors = [
 description = "IDU research package boilerplate"
 readme = "README.rst"
 requires-python = ">=3.10,<=3.13"
-license = { file = "LICENCE" }
+license = { file = "LICENSE" }
 
 dependencies = [ # здесь необходимо вести все устанавливаемые зависимости: пакеты, которые необходимы для адекватной работы вашей библиотеки
     "blocksnet[full,ipynb]==1.0.0.a9",
     "geopandas>=1.0.0,<2.0.0",
     "shapely",
     "pandas>=2.2.3",         
+    "pydantic>=2,<3",
+    "scikit-learn>=1.2",
     "numpy",                 
     "pandera",               
     "matplotlib",            
     "loguru",
     "catboost",
     "libpysal",
-    "pymoo"
+    "pymoo",
+    "tqdm"
 ]
 
 classifiers = [ # метаданные для описания проекта пользователям, например, на PyPI: какая лицензия, какое предназначение
@@ -34,24 +37,18 @@ classifiers = [ # метаданные для описания проекта п
     "Intended Audience :: Science/Research"
 ]
 
-[tool.setuptools.package-dir]
-"" = "src"
-
 [tool.setuptools.packages.find] # что включать в сборку при установке
-where = ["src"]
+where = ["."]
 include = ["urbanomy*"]
 
 
 [project.optional-dependencies]
 llm = [
-    "langchain>=0.3,<0.4",
-    "langchain-community>=0.3,<0.4",
-    "langchain-core>=0.3,<0.4",
-    "langchain-ollama>=0.2,<0.4",
-    "langchain-openai>=0.2,<0.4",
-    "langgraph>=0.2,<1.1",
-    "python-dotenv>=1,<2",
-    "pydantic>=2,<3"
+    "langchain>=1,<2",
+    "langchain-core>=1,<2",
+    "langchain-openai>=1,<2",
+    "langgraph>=1,<2",
+    "python-dotenv>=1,<2"
 ]
 
 rag = [

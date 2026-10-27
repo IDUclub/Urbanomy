@@ -17,11 +17,11 @@ Urbanomy is a research toolkit from the Institute of Design and Urban Studies (I
 
 Highlights
 ----------
-- **Land-value modelling** – build spatial lag features, estimate land prices, and visualise impacts with pre-trained CatBoost models (`urbanomy.methods.land_value_modeling <src/urbanomy/methods/land_value_modeling>`_).
-- **Scenario planning** – modify individual blocks, recompute indicators, and plot price deltas for what-if cases (`urbanomy.methods.land_value_modeling.scenario_modification <src/urbanomy/methods/land_value_modeling/scenario_modification.py>`_).
-- **Investment attractiveness** – aggregate cashflows, NPV/IRR/ROI metrics, and weighted spatial potential into a combined INV score (`urbanomy.methods.investment_potential <src/urbanomy/methods/investment_potential>`_).
-- **Socio-economic footprint** – quantify fiscal and employment effects by combining one-off construction contributions with operating-phase impacts using `SEREstimator <src/urbanomy/methods/ser/ser_calculate.py>`_.
-- **Robust data validation** – Pandera-based schemas for tabular and GeoDataFrame inputs (`urbanomy.utils <src/urbanomy/utils>`_).
+- **Land-value modelling** – build spatial lag features, estimate land prices, and visualise impacts with pre-trained CatBoost models (`urbanomy.methods.land_value_modeling <urbanomy/methods/land_value_modeling>`_).
+- **Scenario planning** – modify individual blocks, recompute indicators, and plot price deltas for what-if cases (`urbanomy.methods.land_value_modeling.scenario_modification <urbanomy/methods/land_value_modeling/scenario_modification.py>`_).
+- **Investment attractiveness** – aggregate cashflows, NPV/IRR/ROI metrics, and weighted spatial potential into a combined INV score (`urbanomy.methods.investment_potential <urbanomy/methods/investment_potential>`_).
+- **Socio-economic footprint** – quantify fiscal and employment effects by combining one-off construction contributions with operating-phase impacts using `SEREstimator <urbanomy/methods/socio_economic_indicators/sei_calculate.py>`_.
+- **Investment input validation** – preparation and validation of scenario tables (`urbanomy.methods.investment_potential.input <urbanomy/methods/investment_potential/input.py>`_).
 
 Installation
 ------------
@@ -38,6 +38,7 @@ Optional dependency groups:
 - ``pip install -e '.[dev]'`` – formatting, linting, pre-commit hooks.
 - ``pip install -e '.[test]'`` – pytest and coverage tooling.
 - ``pip install -e '.[docs]'`` – Sphinx stack for building the documentation.
+- ``pip install -e '.[llm]'`` – LangChain 1.x, LangGraph, and the OpenAI-compatible LLM client.
 
 Quickstart
 ----------
@@ -91,30 +92,21 @@ Investment attractiveness
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 .. code-block:: python
 
-   from urbanomy.methods.investment_potential import (
-       InvestmentAttractivenessAnalyzer,
-       LandUseScoreAnalyzer,
-       prepare_investment_input,
-   )
+   from urbanomy.methods.investment_potential import InvestmentAttractivenessAnalyzer
 
-   # 1. Spatial potential scores per land-use
-   land_use_scores = LandUseScoreAnalyzer().compute_scores_long(prepared_blocks)
+   # blocks_full_value contains the predicted prices before and after the scenario.
+   investment_block = blocks_full_value.loc[blocks_full_value["id"] == target_id].copy()
+   investment_block["is_project"] = True
 
-   # 2. Merge scenario blocks with baseline scores
-   investment_ready = prepare_investment_input(
-       prepared_blocks,
-       base_gdf=land_use_scores,
-       scenario_flag_column="is_project",
-   )
+   # Uses the reference benchmarks, including demolition costs.
+   analyzer = InvestmentAttractivenessAnalyzer()
+   project_summary = analyzer.calculate_investment_metrics(investment_block)
 
-   # 3. Calculate economic metrics and final INV index
-   BENCHMARKS = {
-       "residential": {"density": 1.2, "capex": 85_000, "rent_share": 0.75},
-       "business": {"density": 3.0, "capex": 120_000, "rent_share": 0.65},
-       # ... add other land-use profiles
-   }
-   analyzer = InvestmentAttractivenessAnalyzer(benchmarks=BENCHMARKS)
-   project_summary = analyzer.calculate_investment_metrics(investment_ready)
+For scenario analysis, pass the valued layer containing both ``land_value``
+(the prediction after the change) and ``land_value_before``. The investment
+report's ``land_value`` is the acquisition cost before the change. Demolition
+uses ``build_floor_area_before * cost_demolition`` and is charged once in the
+initial cash flow, so it affects both investment needs and NPV.
 
 .. figure:: docs/img/investment_metrics.png
    :alt: Investment metrics dashboard with INV index
@@ -141,15 +133,97 @@ Socio-economic effects
    ser_table = ser.compute(project_blocks)
    print(ser_table)
 
+LLM-assisted optimization
+~~~~~~~~~~~~~~~~~~~~~~~~~
+The agent implementation lives in ``urbanomy.methods.agent`` and replaces the former
+``urbanomy.methods.agent_interface`` package. Configure ``OPENAI_API_KEY`` in the
+environment or a local ``.env`` file. For an OpenAI-compatible endpoint, also set
+``CHAT_URL`` and ``CHAT_MODEL``; ``FP2MP_CHAT_URL``, ``FP2MP_API_KEY``, and
+``FP2MP_MODEL`` take precedence over the corresponding ``CHAT_*`` settings.
+
+.. code-block:: python
+
+   from urbanomy.methods.agent import SingleAgentBaseline, init_llm
+   from urbanomy.methods.land_value_modeling import (
+       Evaluation,
+       run_nsga2_with_strategic_alignment,
+   )
+
+   baseline = SingleAgentBaseline(
+       llm=init_llm(),
+       output_schema=Evaluation,
+   )
+   # Pass baseline and a non-empty prompt to run_nsga2_with_strategic_alignment,
+   # together with blocks, model, estimator_kwargs, constraints, and target_id.
+   # The third objective is an LLM score between 0 and 1.
+
+``build_pareto_front_dataframe`` returns the target ID, repaired parameters, land
+values, investor NPV, and an ``llm score`` column for three-objective results.
+
+Repeated scenario evaluation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Reuse a ``LandPriceEstimator`` with ``estimator.predict(blocks=scenario_blocks)``
+when evaluating several scenarios. Spatial weights are reused when geometry,
+index order, and CRS match the constructor's dataset; changed layouts rebuild
+the weights. Numeric features and spatial lags are recalculated for every
+scenario. ``DistrictProblem`` reuses the estimator automatically during NSGA-II.
+
+Training and prediction share the same spatial-lag implementation. Investment
+potential scores are calculated from the original attributes, so writing one
+land-use score cannot change the inputs for the next score. Input data is
+preserved during investment preparation.
+
+Notebook-facing imports remain available at their existing paths. Method modules and
+default LLM/embedding clients are loaded on demand; importing ``init_llm`` does
+not construct clients or require credentials.
+
+Code organization
+~~~~~~~~~~~~~~~~~
+The public package exports used by the notebooks remain the entry points.
+Implementation modules are organized by responsibility:
+
+- ``agent/llms.py`` owns environment settings and client construction;
+  ``agent/single_agent.py`` contains the single-agent graph and its wrapper.
+- ``investment_potential/input.py`` prepares and validates scenario tables;
+  ``cashflows.py`` calculates financial results; ``investment_metrics.py``
+  assembles the reports exposed by ``InvestmentAttractivenessAnalyzer``.
+- ``land_value_modeling/pareto.py`` builds result tables for NSGA-II with two
+  or three objectives. LLM scoring during optimization is implemented in
+  ``strategic_alignment.py`` and uses the single-agent baseline.
+- ``scenario_modification.py`` changes block indicators;
+  ``scenario_summary.py`` computes and formats summaries;
+  ``scenario_visualization.py`` renders impact maps.
+- ``urbanomy/utils.py`` contains dependency-free payload conversions.
+
+Internal paths changed: investment input preparation moved from
+``urbanomy.utils.investment_input`` to
+``urbanomy.methods.investment_potential.input``. Prefer the unchanged public
+import ``from urbanomy.methods.investment_potential import prepare_investment_input``.
+Single-agent implementation files were consolidated into
+``urbanomy.methods.agent.single_agent``; Pareto tables are exported from
+``urbanomy.methods.land_value_modeling`` as before.
+
+The former ``pareto_llm_selector`` voting workflow and its dedicated tools and
+models were removed after checking all notebooks in ``examples/``. The active
+LLM workflow scores candidates during NSGA-II optimization with prompt 3.
+The notebooks also use training, data preparation, land-price prediction,
+scenario maps, cash-flow analysis, and socio-economic indicators. ``Agent`` and
+``LandUseScoreAnalyzer`` have no direct calls in the notebooks and remain
+additional public APIs.
+
 Datasets and notebooks
 ----------------------
 Reproducible pipelines live in ``examples/``:
 
-- `examples/land_value_modeling/1_pricing_model_training.ipynb <examples/land_value_modeling/1_pricing_model_training.ipynb>`_ – model training workflow.
-- `examples/land_value_modeling/2_land_data_preparation.ipynb <examples/land_value_modeling/2_land_data_preparation.ipynb>`_ – block feature engineering.
-- `examples/land_value_modeling/3_land_price_modeling.ipynb <examples/land_value_modeling/3_land_price_modeling.ipynb>`_ – scenario pricing walkthrough.
-- `examples/investment_metrics.ipynb <examples/investment_metrics.ipynb>`_ – investment attractiveness dashboard.
-- `examples/socio_economic_indicators.ipynb <examples/socio_economic_indicators.ipynb>`_ – socio-economic reporting.
+- `examples/NSGA2_LLM.ipynb <examples/NSGA2_LLM.ipynb>`_ – NSGA-II optimization with a structured LLM scorer. Install ``.[llm,dev]`` and run from ``examples/``. It expects ``data/blocks_agg_with_indicators.geojson`` and ``data/catboost_land_value_no_services.cbm``. Its final comparison also requires precomputed ``nsga_2_without_llm/no_llm_pareto_front_<seed>.jsonl`` results. These experiment assets are supplied separately.
+- `1_block_cadastral_valuation.ipynb <examples/land_value_modeling/1_block_cadastral_valuation.ipynb>`_ – aggregate cadastral parcel values to urban blocks.
+- `2_cadastral_parcel_features.ipynb <examples/land_value_modeling/2_cadastral_parcel_features.ipynb>`_ – enrich cadastral parcels with land use, building indicators, morphotypes, and accessibility.
+- `3_land_price_classification.ipynb <examples/land_value_modeling/3_land_price_classification.ipynb>`_ – compare price grouping and CatBoost classification approaches.
+- `4_land_price_model_training.ipynb <examples/land_value_modeling/4_land_price_model_training.ipynb>`_ – train and evaluate land-price regression models with spatial lags.
+- `5_scenario_context_preparation.ipynb <examples/land_value_modeling/5_scenario_context_preparation.ipynb>`_ – prepare scenario and context blocks with ``LandDataPreparator``.
+- `examples/gatchina_scenarios.ipynb <examples/gatchina_scenarios.ipynb>`_ – compare NSGA-II optimization with and without LLM scoring for Gatchina.
+- `examples/pipeline.ipynb <examples/pipeline.ipynb>`_ – geospatial preparation, scenario valuation, investment metrics, and socio-economic reporting.
+- `examples/pipeline_prediction_data.ipynb <examples/pipeline_prediction_data.ipynb>`_ – prepare input blocks for land-price prediction.
 
 All notebooks rely on sample assets committed to ``examples/data`` (GeoJSON blocks, accessibility matrices, CatBoost weights, and prepared pickle files). When running the notebooks from another working directory, point the loaders to that folder or provide equivalent datasets in the same structure.
 
@@ -177,7 +251,7 @@ We use the supplied Makefile shortcuts:
 .. code-block:: bash
 
    make install-dev   # install editable package with dev tools
-   make lint          # pylint on src/urbanomy
+   make lint          # pylint on urbanomy
    make test          # pytest tests/
    make install-docs  # editable install with docs extras
 
